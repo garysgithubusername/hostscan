@@ -1,5 +1,7 @@
 # hostscan
 
+[![GitHub](https://img.shields.io/badge/GitHub-hostscan-181717?logo=github)](https://github.com/garysgithubusername/hostscan)
+
 A small CLI that counts the **active hosts** on a network by wrapping `nmap -sn`
 (ping sweep / host discovery, no port scanning).
 
