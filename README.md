@@ -12,25 +12,39 @@ A small CLI that counts the **active hosts** on a network by wrapping `nmap -sn`
 - Python 3.10+
 - `nmap` on your PATH (`brew install nmap` on macOS)
 
+## Install
+
+```bash
+pip install -e .
+```
+
+This puts a `hostscan` command on your PATH, so you can run `hostscan …` from
+anywhere instead of `python hostscan.py …`. (Running the script directly still
+works too.)
+
 ## Usage
 
 ```bash
 # Count active hosts on your local /24 (prompts for authorization)
-python hostscan.py 192.168.1.0/24
+hostscan 192.168.1.0/24
 
 # List each live host, skip the prompt (when permission is already confirmed)
-python hostscan.py 192.168.1.0/24 --list --yes
+hostscan 192.168.1.0/24 --list --yes
 
 # Single host or an octet range
-python hostscan.py 10.0.0.5
-python hostscan.py 192.168.1.1-50
+hostscan 10.0.0.5
+hostscan 192.168.1.1-50
 
 # Pass extra flags straight through to nmap (repeatable)
-python hostscan.py 192.168.1.0/24 --nmap-arg -T4 --nmap-arg -n
+hostscan 192.168.1.0/24 --nmap-arg -T4 --nmap-arg -n
 
 # Restrict scans to an approved engagement scope
-python hostscan.py 10.0.0.0/25 --scope-file scope.txt
+hostscan 10.0.0.0/25 --scope-file scope.txt
 ```
+
+While a scan runs on an interactive terminal, a live status line shows hosts
+found, percent complete, and elapsed time. It's automatically suppressed when
+output is piped; use `--quiet` to turn it off explicitly.
 
 ### Options
 
@@ -40,6 +54,7 @@ python hostscan.py 10.0.0.0/25 --scope-file scope.txt
 | `--scope-file PATH` | Refuse any target not fully inside the approved IP/CIDR list. |
 | `--yes` | Skip the interactive authorization prompt. |
 | `--timeout N` | Abort the scan after `N` seconds (default 600). |
+| `--quiet` | Suppress the live progress display. |
 | `--nmap-arg ARG` | Forward a raw argument to nmap (repeatable). |
 
 ### Scope files

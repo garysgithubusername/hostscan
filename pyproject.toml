@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hostscan"
+version = "1.0.0"
+description = "Count active hosts on networks you are authorized to scan (wraps nmap -sn)."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+hostscan = "hostscan:main"
+
+[tool.setuptools]
+py-modules = ["hostscan"]

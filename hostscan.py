@@ -14,9 +14,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 # An IPv4 or IPv6 network as parsed from a scope file.
 ScopeNet = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -217,13 +220,69 @@ def confirm_authorization(target: str, assume_yes: bool) -> None:
         sys.exit("Aborted: authorization not confirmed.")
 
 
-def build_command(nmap_path: str, target: str, extra_args: list[str]) -> list[str]:
-    """Construct the nmap argument vector for a ping-sweep host discovery scan."""
+def build_command(
+    nmap_path: str,
+    target: str,
+    extra_args: list[str],
+    stats_every: str | None = None,
+) -> list[str]:
+    """Construct the nmap argument vector for a ping-sweep host discovery scan.
+
+    When ``stats_every`` is set (e.g. "2s"), nmap is asked to emit periodic
+    progress lines so we can render a live status during long scans.
+    """
     # -sn : ping scan, no port scan (host discovery only)
-    # -n  : no DNS resolution by default for speed; users can override with extra args
     cmd = [nmap_path, "-sn", target]
+    if stats_every:
+        cmd += ["--stats-every", stats_every]
     cmd.extend(extra_args)
     return cmd
+
+
+# nmap's --stats-every timing line looks like:
+#   Ping Scan Timing: About 45.31% done; ETC: 12:00 (0:00:05 remaining)
+_PERCENT_LINE = re.compile(r"About ([\d.]+)% done")
+
+
+class _Progress:
+    """Renders a single, self-updating status line while a scan runs.
+
+    Only active on an interactive terminal; when output is piped or --quiet is
+    set it does nothing, so captured stdout stays clean for parsing/scripting.
+    """
+
+    def __init__(self, target: str, enabled: bool, stream=sys.stderr) -> None:
+        self.enabled = enabled and stream.isatty()
+        self.stream = stream
+        self.target = target
+        self.hosts = 0
+        self.percent: float | None = None
+        self.start = time.monotonic()
+
+    def on_line(self, line: str) -> None:
+        """Inspect one line of nmap stdout and refresh the status line."""
+        if not self.enabled:
+            return
+        if _HOST_LINE.match(line):
+            self.hosts += 1
+        match = _PERCENT_LINE.search(line)
+        if match:
+            self.percent = float(match.group(1))
+        self._render()
+
+    def _render(self) -> None:
+        elapsed = int(time.monotonic() - self.start)
+        pct = f" · {self.percent:.0f}% done" if self.percent is not None else ""
+        self.stream.write(
+            f"\r  scanning {self.target} … {self.hosts} host(s) up{pct} · {elapsed}s "
+        )
+        self.stream.flush()
+
+    def finish(self) -> None:
+        """Erase the status line so the final report prints cleanly."""
+        if self.enabled:
+            self.stream.write("\r" + " " * 72 + "\r")
+            self.stream.flush()
 
 
 def parse_hosts(nmap_stdout: str) -> list[Host]:
@@ -247,24 +306,90 @@ def parse_hosts(nmap_stdout: str) -> list[Host]:
     return hosts
 
 
-def run_scan(target: str, extra_args: list[str], timeout: int) -> ScanResult:
+def stream_subprocess(
+    command: list[str], timeout: int, on_line: Callable[[str], None]
+) -> subprocess.CompletedProcess:
+    """Run a command, forwarding each stdout line to ``on_line`` as it arrives.
+
+    Returns a CompletedProcess with the full stdout/stderr captured, so callers
+    parse exactly as they would with subprocess.run — the streaming is purely
+    additive (it powers the live progress display). Raises
+    subprocess.TimeoutExpired if the command runs longer than ``timeout``.
+    """
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,  # line-buffered, so progress lines surface promptly
+    )
+
+    # Drain stderr on a thread so a large error stream can't deadlock us while
+    # we block reading stdout.
+    stderr_chunks: list[str] = []
+    stderr_thread = threading.Thread(
+        target=lambda: stderr_chunks.extend(proc.stderr or []),
+        daemon=True,
+    )
+    stderr_thread.start()
+
+    # Iterating proc.stdout has no per-read timeout, so enforce the overall
+    # limit with a watchdog that kills the process.
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        proc.kill()
+
+    watchdog = threading.Timer(timeout, _kill_on_timeout)
+    watchdog.start()
+
+    stdout_lines: list[str] = []
+    try:
+        for line in proc.stdout or []:
+            stdout_lines.append(line)
+            on_line(line)
+        proc.wait()
+    finally:
+        watchdog.cancel()
+        stderr_thread.join(timeout=1)
+
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    return subprocess.CompletedProcess(
+        command,
+        proc.returncode,
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_chunks),
+    )
+
+
+def run_scan(
+    target: str, extra_args: list[str], timeout: int, quiet: bool = False
+) -> ScanResult:
     """Execute the scan and return a structured result."""
     nmap_path = ensure_nmap_available()
-    command = build_command(nmap_path, target, extra_args)
+    progress = _Progress(target, enabled=not quiet)
+    # Only ask nmap for periodic stats when we'll actually render them, so piped
+    # output isn't peppered with progress lines.
+    stats_every = "2s" if progress.enabled else None
+    command = build_command(nmap_path, target, extra_args, stats_every=stats_every)
     started = datetime.now(timezone.utc)
 
+    if not quiet:
+        print(f"Scanning {target} … (Ctrl-C to abort)", file=sys.stderr)
+
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        completed = stream_subprocess(command, timeout, progress.on_line)
     except subprocess.TimeoutExpired:
+        progress.finish()
         sys.exit(f"Error: scan timed out after {timeout}s. Try a smaller range or raise --timeout.")
     except FileNotFoundError:
+        progress.finish()
         sys.exit("Error: nmap binary disappeared mid-run.")
+    finally:
+        progress.finish()
 
     duration = (datetime.now(timezone.utc) - started).total_seconds()
 
@@ -272,7 +397,7 @@ def run_scan(target: str, extra_args: list[str], timeout: int) -> ScanResult:
         stderr = completed.stderr.strip()
         hint = ""
         if "root" in stderr.lower() or "privilege" in stderr.lower():
-            hint = "\nHint: some scan types need elevated privileges. Try: sudo python hostscan.py ..."
+            hint = "\nHint: some scan types need elevated privileges. Try: sudo hostscan ..."
         sys.exit(f"nmap exited with code {completed.returncode}:\n{stderr}{hint}")
 
     hosts = parse_hosts(completed.stdout)
@@ -338,6 +463,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Maximum seconds to allow the scan to run (default: 600).",
     )
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress the live progress display (auto-disabled when output is piped).",
+    )
+    parser.add_argument(
         "--nmap-arg",
         action="append",
         default=[],
@@ -361,7 +491,9 @@ def main(argv: list[str] | None = None) -> int:
         enforce_scope(target, scope)
 
     confirm_authorization(target, assume_yes=args.yes)
-    result = run_scan(target, extra_args=args.extra_args, timeout=args.timeout)
+    result = run_scan(
+        target, extra_args=args.extra_args, timeout=args.timeout, quiet=args.quiet
+    )
     print_report(result, show_hosts=args.show_hosts)
     return 0
 
