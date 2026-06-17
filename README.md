@@ -48,6 +48,29 @@ While a scan runs on an interactive terminal, a live status line shows hosts
 found, percent complete, and elapsed time. It's automatically suppressed when
 output is piped; use `--quiet` to turn it off explicitly.
 
+### Sample output
+
+With `--list`, a run looks like this:
+
+```
+$ hostscan 192.168.1.0/24 --list --yes
+Scanning 192.168.1.0/24 … (Ctrl-C to abort)
+
+========================================================
+  Target:        192.168.1.0/24
+  Started:       2026-06-17T16:29:52.897399+00:00
+  Duration:      2.51s
+  Active hosts:  3
+========================================================
+
+Live hosts:
+  192.168.1.1   (router.local)
+  192.168.1.42
+  192.168.1.50  (laptop.local)
+```
+
+Without `--list` you get just the summary box (no per-host list).
+
 ### Options
 
 | Flag | Description |
